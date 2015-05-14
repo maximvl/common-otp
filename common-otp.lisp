@@ -3,10 +3,9 @@
 (in-package #:common-otp)
 
 ;;; "common-otp" goes here. Hacks and glory await!
-(defparameter *processes* (make-hash-table :synchronized t))
-
 (defparameter *core-channel* (lparallel.kernel:make-channel))
 (defparameter *next-pid* 0)
+(defparameter *current-process* nil)
 
 (defun make-next-pid ()
   (lparallel.kernel:submit-task *core-channel* (lambda () (incf *next-pid*)))
@@ -36,58 +35,48 @@
    (name
     :accessor name
     :initarg :name
-    :initform nil)))
+    :initform nil)
+   (state
+    :accessor state
+    :initarg :state
+    :initform :alive)))
+
+(defun process-equal (process1 process2)
+  (= (pid process1) (pid process2)))
 
 (defmethod print-object ((object process) stream)
   (print-unreadable-object (object stream)
     (format stream "0.~a.0" (pid object))))
-
-(defparameter *current-process* nil)
 
 (defun wrap-initial-f (process f)
   (lambda () (let ((*current-process* process)) 
           (unwind-protect (funcall f)
             (notify-links process)
             (notify-monitors process)
-            (remhash (pid process) *processes*)))))
+            (setf (state process) :dead)))))
 
 (defun notify-links (process)
-  (let ((pid (pid process)))
-    (loop for l in (links process) do (send l (list 'exit pid)))))
+  (loop for l in (links process) do (send l (list 'exit process))))
 
 (defun notify-monitors (process)
-  (let ((pid (pid process)))
-    (loop for m in (monitors process) do (send m (list 'exit pid)))))
+  (loop for m in (monitors process) do (send m (list 'exit process))))
 
 (defun spawn (f)
   (let* ((channel (lparallel:make-channel))
          (mbox (lparallel.queue:make-queue))
-         (process (make-instance 'process :initial-func f :mailbox mbox))
-         (pid (pid process)))
+         (process (make-instance 'process :initial-func f :mailbox mbox)))
     (lparallel.kernel:submit-task channel (wrap-initial-f process f))
-    (setf (gethash pid *processes*) process)
-    pid))
+    process))
 
-(defun pid-process (pid)
-  (gethash pid *processes*))
+(defun send (process message)
+  (when process
+    (let ((mbox (mailbox p)))
+      (lparallel.queue:push-queue message mbox))))
 
-(defmacro with-process (pid name &rest body)
-  `(let ((,name (pid-process ,pid)))
-     (when ,name ,@body)))
+(defun self () *current-process*)
 
-(defun send (pid message)
-  (let ((p (pid-process pid)))
-    (when p
-      (let ((mbox (mailbox p)))
-        (lparallel.queue:push-queue message mbox)))))
-
-(defun self ()
-  (pid *current-process*))
-
-(defun is-process-alive (pid)
-  (multiple-value-bind (p exist) (gethash pid *processes*)
-    (declare (ignore p))
-    exist))
+(defun is-process-alive (process)
+  (eql (state process) :alive))
 
 (defun receive (&optional timeout)
   (let ((mbox (mailbox *current-process*)))
